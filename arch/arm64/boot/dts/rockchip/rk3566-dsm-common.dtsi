@@ -165,6 +165,32 @@
 	/delete-node/ opp-j-1416000000;
 	/delete-node/ opp-m-1608000000;
 
+	/*
+	 * P0.5: 1800 MHz is a bad bin on this board.
+	 *
+	 * Verified on hardware: with >=2 cores under load the box hard-hangs
+	 * at a peak of only 56 C, far below every thermal trip.  Reproduced
+	 * with two different supplies, so it is not thermal and not a PSU
+	 * fault.  The 1608 MHz cap used to be enforced only by the uInitrd
+	 * hook writing scaling_max_freq; if that hook ever stops running
+	 * (firmware upgrade, path change, initrd rebuild) the kernel would
+	 * happily pick 1800 MHz again and hang the box.
+	 *
+	 * Deleting the OPP makes 1608 MHz a kernel level limit: cpufreq no
+	 * longer exposes 1800 MHz at all, so the hook becomes a redundant
+	 * belt-and-braces measure rather than the only guard.
+	 *
+	 * CONSEQUENCE: the cooling state numbering changes with it.  With
+	 * 6 OPPs (408/600/816/1104/1416/1608 MHz) max_state becomes 5 and
+	 * the states shift down by one compared to a 7 OPP table:
+	 *   state 0 -> 1608   state 1 -> 1416   state 2 -> 1104
+	 *   state 3 ->  816   state 4 ->  600   state 5 ->  408
+	 * Every cooling-device limit in the thermal maps below MUST be
+	 * renumbered together with this deletion - the CI asserts both the
+	 * OPP count and the resulting limits so the two cannot drift apart.
+	 */
+	/delete-node/ opp-1800000000;
+
 	opp-408000000 {
 		/delete-property/ opp-supported-hw;
 		opp-hz = /bits/ 64 <408000000>;
@@ -201,10 +227,42 @@
 		opp-microvolt = <1100000 1100000 1200000>;
 	};
 
-	opp-1800000000 {
-		/delete-property/ opp-supported-hw;
-		opp-hz = /bits/ 64 <1800000000>;
-		opp-microvolt = <1150000 1150000 1200000>;
+	/*
+	 * P0: make the board level opp-microvolt above actually apply.
+	 *
+	 * rockchip_set_opp_prop_name() derives "opp-microvolt-L<n>" from the
+	 * chip leakage/PVTM bin, and opp/of.c looks that property up FIRST,
+	 * falling back to plain "opp-microvolt" only when it is absent.
+	 * The SoC dtsi still carries the inherited per-bin voltages, so on
+	 * every L1/L2/L3 part the board values above were bypassed.
+	 * Measured on this unit (pvtm-volt-sel=1): 1608 MHz ran at 1050 mV
+	 * instead of 1100 mV, 1416 MHz at 975 mV instead of 1025 mV, i.e.
+	 * a uniform -50 mV gap.  vdd_cpu is a pwm-regulator, so that head
+	 * room is not free.  Drop the inherited per-bin voltages so the
+	 * values written above are the ones actually applied.
+	 *
+	 * opp-1800000000 is not touched here: it is deleted entirely above,
+	 * so it must not be redefined below.
+	 */
+	opp-1104000000 {
+		/delete-property/ opp-microvolt-L0;
+		/delete-property/ opp-microvolt-L1;
+		/delete-property/ opp-microvolt-L2;
+		/delete-property/ opp-microvolt-L3;
+	};
+
+	opp-1416000000 {
+		/delete-property/ opp-microvolt-L0;
+		/delete-property/ opp-microvolt-L1;
+		/delete-property/ opp-microvolt-L2;
+		/delete-property/ opp-microvolt-L3;
+	};
+
+	opp-1608000000 {
+		/delete-property/ opp-microvolt-L0;
+		/delete-property/ opp-microvolt-L1;
+		/delete-property/ opp-microvolt-L2;
+		/delete-property/ opp-microvolt-L3;
 	};
 };
 
@@ -378,6 +436,165 @@
 
 &rknpu_mmu {
 	status = "okay";
+};
+
+/*
+ * Tie the NPU to the SoC thermal policy.
+ *
+ * The NPU runs its own devfreq (fde40000.npu, governor rknpu_ondemand,
+ * 200..900 MHz) and rockchip's rknpu_devfreq.c already registers a
+ * devfreq cooling device for it (thermal-devfreq-*, max_state=6).  But
+ * without #cooling-cells on this node, of_count_phandle_with_args()
+ * refuses to resolve it as a "cooling-device" target, so no cooling-map
+ * could ever reference it and the NPU was never thermally throttled: it
+ * ran at up to 900 MHz with no thermal protection at all.
+ *
+ * With #cooling-cells present the NPU can be referenced from a
+ * cooling-map like any other device.  Its state range is indexed from
+ * the top of its own ascending devfreq frequency table
+ * (200/297/400/600/700/800/900 MHz), so state 1 is 800 MHz and state 3
+ * is 600 MHz.
+ */
+&rknpu {
+	#cooling-cells = <2>;
+};
+
+/*
+ * Thermal policy for the RK3566 OEC BOX (DS124).
+ *
+ * The board is passively cooled: no fan, and the SoC reaches its limit
+ * long before the stock 85 C trip.  Verified on hardware: a >=2 core load
+ * at 1800 MHz hard-hangs the box at a peak of 56 C, i.e. well below both
+ * the 75 C and the 85 C trip, so the stock trips are useless as a
+ * protection.  The SoC dtsi also ships a 75 C "threshold" trip that no
+ * cooling-map ever referenced, so it was a dead entry.
+ *
+ * Three explicit steps now, each binding the CPU cooling device to a
+ * tighter state range:
+ *
+ *   60 C  state 1..2  ->  1416 / 1104 MHz   start throttling
+ *   68 C  state 3     ->  816 MHz            intermediate cap
+ *   75 C  state 5     ->  408 MHz            hard floor (was 85 C)
+ *
+ * The state numbers index the ascending cpufreq frequency table from the
+ * top: state 0 is the highest frequency.  Note that this table has SIX
+ * entries because opp-1800000000 is deleted above (see the comment there
+ * for why, and for the renumbering that deletion causes).
+ *
+ * The cooling-device phandle carries two cell arguments: the first is
+ * the MAXIMUM state (= the lowest frequency this trip may allow) and the
+ * second is the MINIMUM state (= the highest frequency it may allow).
+ * thermal_core.c binds them as instance->lower / instance->upper, and
+ * gov_step_wise.c clamps the target into that window.
+ *
+ * Only the FIRST argument is meaningful as a cap here: it says "this trip
+ * must not let the CPU run faster than X".  The second argument is left at
+ * THERMAL_NO_LIMIT so the governor is free to go as deep as it wants -
+ * down to the lowest OPP - when the temperature keeps climbing.  Pinning
+ * both ends (state N state N) would additionally forbid the CPU from
+ * dropping below that frequency, which is exactly the wrong direction for
+ * a passively cooled box: the deeper the throttle, the better the cooling.
+ *
+ * So each tier states a CEILING on the frequency, and the governor walks
+ * down from there on its own as the trend rises.  The ceilings are
+ * monotonic (state 1 > state 3 > state 5 = progressively lower), so a
+ * deeper trip always wins over a shallower one - thermal_cdev_update()
+ * takes the highest target across all instances bound to the same device.
+ *
+ * The GPU keeps its own map1 on the same 75 C trip and its own cooling
+ * device (thermal-devfreq-*), so the CPU state numbers above do not drag
+ * the GPU down.
+ *
+ * NOTE: node overrides merge by PATH, not by label, so the trips below
+ * reuse the SoC dtsi node names (trip-point-0/1) on purpose.  Writing
+ * "threshold { ... }" here would create a *sibling* node named
+ * "threshold" instead of changing trip-point-0.
+ */
+&soc_thermal {
+	trips {
+		/* was 75000 and bound to nothing - a dead trip */
+		trip-point-0 {
+			temperature = <60000>;
+		};
+
+		/* was 85000; the box hard-hangs well before 85 C */
+		trip-point-1 {
+			temperature = <75000>;
+		};
+
+		/* new intermediate step */
+		cpu_mid: trip-point-2 {
+			temperature = <68000>;
+			hysteresis = <2000>;
+			type = "passive";
+		};
+	};
+
+	cooling-maps {
+		/*
+		 * map0 and map1 come from rk3568.dtsi and both point at the
+		 * 85 C "target" trip: map0 -> CPU, map1 -> GPU.  map0 is
+		 * tightened to the 75 C ceiling; map1 is left untouched so
+		 * the GPU keeps its own behaviour.
+		 *
+		 * Each cooling-device reference is <&dev MAXSTATE THERMAL_NO_LIMIT>:
+		 * MAXSTATE is the fastest frequency the tier may allow, and the
+		 * unlimited second argument lets the governor drop all the way
+		 * to the lowest OPP when the temperature keeps rising.
+		 */
+		map0 {
+			trip = <&target>;
+			cooling-device = <&cpu0 5 THERMAL_NO_LIMIT>;
+			contribution = <1024>;
+		};
+
+		/* 68 C: the CPU may not run faster than 816 MHz */
+		map2 {
+			trip = <&cpu_mid>;
+			cooling-device = <&cpu0 3 THERMAL_NO_LIMIT>;
+			contribution = <1024>;
+		};
+
+		/* 60 C: the CPU may not run faster than 1416 MHz */
+		map3 {
+			trip = <&threshold>;
+			cooling-device = <&cpu0 1 THERMAL_NO_LIMIT>;
+			contribution = <1024>;
+		};
+
+		/*
+		 * NPU follows the same thermal steps, with its own state
+		 * numbering (its devfreq table is 200/297/400/600/700/800/900
+		 * MHz, state 0 = 900 MHz):
+		 *
+		 *   60 C  max state 1  ->  at most 800 MHz
+		 *   68 C  max state 3  ->  at most 600 MHz
+		 *   75 C  max state 5  ->  at most 297 MHz
+		 *
+		 * The NPU is fed from vdd_fixed (950 mV, fixed) so it cannot be
+		 * voltage-scaled down; frequency is the only lever available.
+		 * This is deliberately conservative - the reported crash is a
+		 * hang during large-batch photo recognition, where the NPU is
+		 * the hot core.
+		 */
+		map4 {
+			trip = <&threshold>;
+			cooling-device = <&rknpu 1 THERMAL_NO_LIMIT>;
+			contribution = <512>;
+		};
+
+		map5 {
+			trip = <&cpu_mid>;
+			cooling-device = <&rknpu 3 THERMAL_NO_LIMIT>;
+			contribution = <512>;
+		};
+
+		map6 {
+			trip = <&target>;
+			cooling-device = <&rknpu 5 THERMAL_NO_LIMIT>;
+			contribution = <512>;
+		};
+	};
 };
 
 &npu_opp_table {
