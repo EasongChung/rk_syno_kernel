@@ -439,25 +439,17 @@
 };
 
 /*
- * Tie the NPU to the SoC thermal policy.
+ * Deliberately no #cooling-cells on the NPU.
  *
- * The NPU runs its own devfreq (fde40000.npu, governor rknpu_ondemand,
- * 200..900 MHz) and rockchip's rknpu_devfreq.c already registers a
- * devfreq cooling device for it (thermal-devfreq-*, max_state=6).  But
- * without #cooling-cells on this node, of_count_phandle_with_args()
- * refuses to resolve it as a "cooling-device" target, so no cooling-map
- * could ever reference it and the NPU was never thermally throttled: it
- * ran at up to 900 MHz with no thermal protection at all.
+ * Giving the node #cooling-cells would let a cooling-map reference it, but
+ * that does not make thermal management work: the NPU frequency is static
+ * (the rknpu_ondemand governor does not sample load) and it already sits at
+ * 600 MHz on a fixed 950 mV rail, so "throttling" it either does nothing or
+ * risks an under-voltage operating point the OPP table never described.
  *
- * With #cooling-cells present the NPU can be referenced from a
- * cooling-map like any other device.  Its state range is indexed from
- * the top of its own ascending devfreq frequency table
- * (200/297/400/600/700/800/900 MHz), so state 1 is 800 MHz and state 3
- * is 600 MHz.
+ * Its high-temperature protection is a userspace task gate in the
+ * RK3566_NPU_Server package instead - see the cooling-maps comment above.
  */
-&rknpu {
-	#cooling-cells = <2>;
-};
 
 /*
  * Thermal policy for the RK3566 OEC BOX (DS124).
@@ -469,12 +461,13 @@
  * protection.  The SoC dtsi also ships a 75 C "threshold" trip that no
  * cooling-map ever referenced, so it was a dead entry.
  *
- * Three explicit steps now, each binding the CPU cooling device to a
- * tighter state range:
+ * Three explicit steps now, each stating a CEILING on the CPU frequency;
+ * the low end of every bound is THERMAL_NO_LIMIT so the governor may keep
+ * dropping towards the lowest OPP as the temperature keeps rising:
  *
- *   60 C  state 1..2  ->  1416 / 1104 MHz   start throttling
- *   68 C  state 3     ->  816 MHz            intermediate cap
- *   75 C  state 5     ->  408 MHz            hard floor (was 85 C)
+ *   60 C  at most 1416 MHz   (state 1)   start throttling
+ *   68 C  at most  816 MHz   (state 3)   intermediate cap
+ *   75 C  at most  408 MHz   (state 5)   hard floor (was 85 C)
  *
  * The state numbers index the ascending cpufreq frequency table from the
  * top: state 0 is the highest frequency.  Note that this table has SIX
@@ -563,37 +556,32 @@
 		};
 
 		/*
-		 * NPU follows the same thermal steps, with its own state
-		 * numbering (its devfreq table is 200/297/400/600/700/800/900
-		 * MHz, state 0 = 900 MHz):
+		 * The NPU is deliberately NOT bound here.
 		 *
-		 *   60 C  max state 1  ->  at most 800 MHz
-		 *   68 C  max state 3  ->  at most 600 MHz
-		 *   75 C  max state 5  ->  at most 297 MHz
+		 * Throttling it through a cooling-map does not work on this
+		 * board, for two independent reasons:
 		 *
-		 * The NPU is fed from vdd_fixed (950 mV, fixed) so it cannot be
-		 * voltage-scaled down; frequency is the only lever available.
-		 * This is deliberately conservative - the reported crash is a
-		 * hang during large-batch photo recognition, where the NPU is
-		 * the hot core.
+		 *  1. the NPU has no load-driven frequency scaling.  The
+		 *     rknpu_ondemand governor's get_dev_status() returns
+		 *     nothing and get_target_freq() just echoes ondemand_freq,
+		 *     which is set once at probe to the current clock and only
+		 *     changed by a debugfs write.  The frequency is static.
+		 *
+		 *  2. the static frequency it sits at is already 600 MHz, which
+		 *     is also the LOWEST state this table could meaningfully
+		 *     ask for without going below the boot frequency.  Any
+		 *     cooling step that lands on 600 MHz changes nothing.
+		 *
+		 * On top of that the NPU rail is vdd_fixed, a fixed 950 mV
+		 * regulator, so lowering the clock would not lower the voltage
+		 * either - the thermal benefit is a fraction of the CPU's.
+		 *
+		 * High-temperature protection for the NPU therefore lives in
+		 * userspace: the RK3566_NPU_Server package pauses acceptance of
+		 * new recognition jobs at 68 C and resumes at 65 C, finishing
+		 * the photo already in flight first.  See
+		 * npufix-spk/src/payload/npulib/rknn_server/npu_server_rknn.py.
 		 */
-		map4 {
-			trip = <&threshold>;
-			cooling-device = <&rknpu 1 THERMAL_NO_LIMIT>;
-			contribution = <512>;
-		};
-
-		map5 {
-			trip = <&cpu_mid>;
-			cooling-device = <&rknpu 3 THERMAL_NO_LIMIT>;
-			contribution = <512>;
-		};
-
-		map6 {
-			trip = <&target>;
-			cooling-device = <&rknpu 5 THERMAL_NO_LIMIT>;
-			contribution = <512>;
-		};
 	};
 };
 
