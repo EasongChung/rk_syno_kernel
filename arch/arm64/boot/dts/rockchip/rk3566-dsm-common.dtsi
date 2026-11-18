@@ -465,9 +465,13 @@
  * the low end of every bound is THERMAL_NO_LIMIT so the governor may keep
  * dropping towards the lowest OPP as the temperature keeps rising:
  *
- *   60 C  at most 1416 MHz   (state 1)   start throttling
- *   68 C  at most  816 MHz   (state 3)   intermediate cap
+ *   50 C  at most 1416 MHz   (state 1)   start throttling
+ *   55 C  at most  816 MHz   (state 3)   intermediate cap
  *   75 C  at most  408 MHz   (state 5)   hard floor (was 85 C)
+ *
+ * The 50/55 C steps replace the old 60/68 C ones: measured real concurrent
+ * load (face+concept) peaks at 57.2 C and never reached 60 C, so the old
+ * first two steps never engaged.  The 75 C hard floor is unchanged.
  *
  * The state numbers index the ascending cpufreq frequency table from the
  * top: state 0 is the highest frequency.  Note that this table has SIX
@@ -505,9 +509,14 @@
  */
 &soc_thermal {
 	trips {
-		/* was 75000 and bound to nothing - a dead trip */
+		/* was 75000 and bound to nothing - a dead trip.
+		 * 50000 (50 C): measured real concurrent load (face+concept) peaks
+		 * at 57.2 C while 60 C was never reached, so the old 60 C first step
+		 * never engaged.  Hysteresis 2000 inherited -> resumes at 48 C, which
+		 * keeps the 48.3 C single-task concept run from thrashing.
+		 */
 		trip-point-0 {
-			temperature = <60000>;
+			temperature = <50000>;
 		};
 
 		/* was 85000; the box hard-hangs well before 85 C */
@@ -515,9 +524,11 @@
 			temperature = <75000>;
 		};
 
-		/* new intermediate step */
+		/* intermediate step. 68 C was also unreachable (peak 57.2 C);
+		 * 55 C sits 5 C above the first step and within the concurrent peak.
+		 */
 		cpu_mid: trip-point-2 {
-			temperature = <68000>;
+			temperature = <55000>;
 			hysteresis = <2000>;
 			type = "passive";
 		};
@@ -541,14 +552,14 @@
 			contribution = <1024>;
 		};
 
-		/* 68 C: the CPU may not run faster than 816 MHz */
+		/* 55 C: the CPU may not run faster than 816 MHz */
 		map2 {
 			trip = <&cpu_mid>;
 			cooling-device = <&cpu0 3 THERMAL_NO_LIMIT>;
 			contribution = <1024>;
 		};
 
-		/* 60 C: the CPU may not run faster than 1416 MHz */
+		/* 50 C: the CPU may not run faster than 1416 MHz */
 		map3 {
 			trip = <&threshold>;
 			cooling-device = <&cpu0 1 THERMAL_NO_LIMIT>;
