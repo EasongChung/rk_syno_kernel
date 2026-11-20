@@ -195,10 +195,9 @@
 	status = "okay";
 };
 
-&sdhci {
-	mmc-hs400-1_8v;
-	mmc-hs400-enhanced-strobe;
-};
+/* eMMC compatibility policy is set in rk3566-dsm-common.dtsi.
+ * Do not re-enable HS400 here after the common file disabled it.
+ */
 
 &spi1 {
 	pinctrl-names = "default";
