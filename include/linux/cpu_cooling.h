@@ -40,7 +40,19 @@ void cpufreq_cooling_unregister(struct thermal_cooling_device *cdev);
 struct thermal_cooling_device *
 of_cpufreq_cooling_register(struct cpufreq_policy *policy);
 
+/* Bind a frequency cap against the actual, hardware-filtered OPP table. */
+int cpufreq_cooling_get_state_for_freq(struct thermal_cooling_device *cdev,
+				     unsigned int freq_khz,
+				     unsigned long *state);
+
 #else /* !CONFIG_CPU_FREQ_THERMAL */
+static inline int
+cpufreq_cooling_get_state_for_freq(struct thermal_cooling_device *cdev,
+				 unsigned int freq_khz, unsigned long *state)
+{
+	return -ENOSYS;
+}
+
 static inline struct thermal_cooling_device *
 cpufreq_cooling_register(struct cpufreq_policy *policy)
 {

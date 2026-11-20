@@ -1,0 +1,38 @@
+Rockchip OEC CPU frequency ceilings in thermal cooling maps
+==========================================================
+
+This compatibility-branch extension is opt-in. Existing thermal cooling maps
+without this property keep the standard min/max-state interpretation.
+
+Optional property on a cooling-map node:
+  rockchip,cpu-frequency-ceiling-khz: one non-zero u32, maximum CPU frequency
+                                    in kHz requested by this trip.
+
+Constraints:
+  - Exactly one cooling-device entry; it must resolve to a CPUFreq cooling
+    device, not GPU/NPU/devfreq.
+  - OEC maps use <&cpu0 0 THERMAL_NO_LIMIT>. The zero is a placeholder for the
+    lower cooling-state bound; the kernel resolves it from the filtered
+    CPUFreq table when binding. The upper state bound remains unlimited so
+    further cooling down to the bin's minimum OPP is possible.
+  - The kernel helper chooses the fastest available OPP not above the cap.
+    If none exists, it selects the lowest OPP and emits a warning. This is a
+    documented loss of protection, not an assertion that the cap was met.
+  - Invalid scalar values, multiple devices, or a non-CPU device are rejected.
+
+Example:
+  map2 {
+    trip = <&cpu_mid>;
+    cooling-device = <&cpu0 0 THERMAL_NO_LIMIT>;
+    rockchip,cpu-frequency-ceiling-khz = <816000>;
+    contribution = <1024>;
+  };
+
+OEC normal/M table (kHz): 408000 600000 816000 1104000 1416000 1608000
+  Requested 1416000/816000/408000 -> cooling states 1/3/5.
+OEC J table (kHz): 1008000 1416000
+  Requested 1416000/816000/408000 -> states 0/1/1, applied 1416000/1008000/1008000.
+
+The J fallback at 55/75 C was explicitly accepted for this compatibility test.
+The critical shutdown trip remains 115 C. Hardware filtering and the helper
+must be tested together; the DTB is not compatible with an unmodified kernel.

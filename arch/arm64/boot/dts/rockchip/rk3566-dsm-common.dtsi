@@ -159,11 +159,12 @@
 };
 
 &cpu0_opp_table {
-	/delete-property/ rockchip,supported-hw;
+	/* Restore Rockchip SoC-version and speed-grade filtering.
+	 * The J/M alternatives are inherited from rk3568.dtsi; do not delete
+	 * them or a special bin can lose all of its valid frequency points.
+	 */
+	rockchip,supported-hw;
 	/delete-node/ opp-1992000000;
-	/delete-node/ opp-j-1008000000;
-	/delete-node/ opp-j-1416000000;
-	/delete-node/ opp-m-1608000000;
 
 	/*
 	 * P0.5: 1800 MHz is a bad bin on this board.
@@ -180,49 +181,45 @@
 	 * longer exposes 1800 MHz at all, so the hook becomes a redundant
 	 * belt-and-braces measure rather than the only guard.
 	 *
-	 * CONSEQUENCE: the cooling state numbering changes with it.  With
-	 * 6 OPPs (408/600/816/1104/1416/1608 MHz) max_state becomes 5 and
-	 * the states shift down by one compared to a 7 OPP table:
-	 *   state 0 -> 1608   state 1 -> 1416   state 2 -> 1104
-	 *   state 3 ->  816   state 4 ->  600   state 5 ->  408
-	 * Every cooling-device limit in the thermal maps below MUST be
-	 * renumbered together with this deletion - the CI asserts both the
-	 * OPP count and the resulting limits so the two cannot drift apart.
+	 * With hardware filtering restored, the normal/M table has six OPPs,
+	 * while the J table has only 1008/1416 MHz.  Cooling maps therefore
+	 * specify frequency ceilings, resolved against the actual CPUFreq
+	 * table when binding, rather than assuming one state index layout.
 	 */
 	/delete-node/ opp-1800000000;
 
 	opp-408000000 {
-		/delete-property/ opp-supported-hw;
+		opp-supported-hw = <0xfb 0xffff>;
 		opp-hz = /bits/ 64 <408000000>;
 		opp-microvolt = <850000 850000 1200000>;
 	};
 
 	opp-600000000 {
-		/delete-property/ opp-supported-hw;
+		opp-supported-hw = <0xfb 0xffff>;
 		opp-hz = /bits/ 64 <600000000>;
 		opp-microvolt = <850000 850000 1200000>;
 	};
 
 	opp-816000000 {
-		/delete-property/ opp-supported-hw;
+		opp-supported-hw = <0xfb 0xffff>;
 		opp-hz = /bits/ 64 <816000000>;
 		opp-microvolt = <850000 850000 1200000>;
 	};
 
 	opp-1104000000 {
-		/delete-property/ opp-supported-hw;
+		opp-supported-hw = <0xfb 0xffff>;
 		opp-hz = /bits/ 64 <1104000000>;
 		opp-microvolt = <900000 900000 1200000>;
 	};
 
 	opp-1416000000 {
-		/delete-property/ opp-supported-hw;
+		opp-supported-hw = <0xfb 0xffff>;
 		opp-hz = /bits/ 64 <1416000000>;
 		opp-microvolt = <1025000 1025000 1200000>;
 	};
 
 	opp-1608000000 {
-		/delete-property/ opp-supported-hw;
+		opp-supported-hw = <0xf9 0xffff>;
 		opp-hz = /bits/ 64 <1608000000>;
 		opp-microvolt = <1100000 1100000 1200000>;
 	};
@@ -461,42 +458,26 @@
  * protection.  The SoC dtsi also ships a 75 C "threshold" trip that no
  * cooling-map ever referenced, so it was a dead entry.
  *
- * Three explicit steps now, each stating a CEILING on the CPU frequency;
- * the low end of every bound is THERMAL_NO_LIMIT so the governor may keep
- * dropping towards the lowest OPP as the temperature keeps rising:
+ * Three explicit frequency ceilings, resolved against the hardware-filtered
+ * CPUFreq table at cooling-map binding time:
  *
- *   50 C  at most 1416 MHz   (state 1)   start throttling
- *   55 C  at most  816 MHz   (state 3)   intermediate cap
- *   75 C  at most  408 MHz   (state 5)   hard floor (was 85 C)
+ *   50 C  request at most 1416 MHz
+ *   55 C  request at most  816 MHz
+ *   75 C  request at most  408 MHz
  *
- * The 50/55 C steps replace the old 60/68 C ones: measured real concurrent
- * load (face+concept) peaks at 57.2 C and never reached 60 C, so the old
- * first two steps never engaged.  The 75 C hard floor is unchanged.
+ * Normal/M bins have six OPPs and resolve these to states 1/3/5.  The J
+ * alternatives provide only 1008/1416 MHz, so they resolve to states 0/1/1.
+ * For J, 1008 MHz is the documented fallback at 55/75 C, NOT 816/408 MHz.
  *
- * The state numbers index the ascending cpufreq frequency table from the
- * top: state 0 is the highest frequency.  Note that this table has SIX
- * entries because opp-1800000000 is deleted above (see the comment there
- * for why, and for the renumbering that deletion causes).
+ * The 50/55 C thresholds were chosen after a real NPU + simulated CPU
+ * image-decode load reached 57.2 C; they are not proof of the cause of
+ * lockups or white-LED boot failures reported on other boards.
  *
- * The cooling-device phandle carries two cell arguments: the first is
- * the MAXIMUM state (= the lowest frequency this trip may allow) and the
- * second is the MINIMUM state (= the highest frequency it may allow).
- * thermal_core.c binds them as instance->lower / instance->upper, and
- * gov_step_wise.c clamps the target into that window.
- *
- * Only the FIRST argument is meaningful as a cap here: it says "this trip
- * must not let the CPU run faster than X".  The second argument is left at
- * THERMAL_NO_LIMIT so the governor is free to go as deep as it wants -
- * down to the lowest OPP - when the temperature keeps climbing.  Pinning
- * both ends (state N state N) would additionally forbid the CPU from
- * dropping below that frequency, which is exactly the wrong direction for
- * a passively cooled box: the deeper the throttle, the better the cooling.
- *
- * So each tier states a CEILING on the frequency, and the governor walks
- * down from there on its own as the trend rises.  The ceilings are
- * monotonic (state 1 > state 3 > state 5 = progressively lower), so a
- * deeper trip always wins over a shallower one - thermal_cdev_update()
- * takes the highest target across all instances bound to the same device.
+ * rockchip,cpu-frequency-ceiling-khz overrides the lower cooling-state
+ * bound using the runtime table.  The first cooling-device argument is
+ * only a zero placeholder; the upper bound stays THERMAL_NO_LIMIT so
+ * step_wise can continue down to the lowest frequency the bin supports.
+ * The standard cooling-map ABI is unchanged for maps without this property.
  *
  * The GPU keeps its own map1 on the same 75 C trip and its own cooling
  * device (thermal-devfreq-*), so the CPU state numbers above do not drag
@@ -548,21 +529,24 @@
 		 */
 		map0 {
 			trip = <&target>;
-			cooling-device = <&cpu0 5 THERMAL_NO_LIMIT>;
+			cooling-device = <&cpu0 0 THERMAL_NO_LIMIT>;
+			rockchip,cpu-frequency-ceiling-khz = <408000>;
 			contribution = <1024>;
 		};
 
 		/* 55 C: the CPU may not run faster than 816 MHz */
 		map2 {
 			trip = <&cpu_mid>;
-			cooling-device = <&cpu0 3 THERMAL_NO_LIMIT>;
+			cooling-device = <&cpu0 0 THERMAL_NO_LIMIT>;
+			rockchip,cpu-frequency-ceiling-khz = <816000>;
 			contribution = <1024>;
 		};
 
 		/* 50 C: the CPU may not run faster than 1416 MHz */
 		map3 {
 			trip = <&threshold>;
-			cooling-device = <&cpu0 1 THERMAL_NO_LIMIT>;
+			cooling-device = <&cpu0 0 THERMAL_NO_LIMIT>;
+			rockchip,cpu-frequency-ceiling-khz = <1416000>;
 			contribution = <1024>;
 		};
 
@@ -589,7 +573,7 @@
 		 *
 		 * High-temperature protection for the NPU therefore lives in
 		 * userspace: the RK3566_NPU_Server package pauses acceptance of
-		 * new recognition jobs at 68 C and resumes at 65 C, finishing
+		 * new recognition jobs at 55 C and resumes at 53 C, finishing
 		 * the photo already in flight first.  See
 		 * npufix-spk/src/payload/npulib/rknn_server/npu_server_rknn.py.
 		 */
@@ -656,6 +640,13 @@
 };
 
 &sdhci {
+	/* Compatibility experiment: avoid the HS200/HS400 DLL/tuning path. */
+	max-frequency = <52000000>;
+	/delete-property/ mmc-hs200-1_8v;
+	/delete-property/ mmc-hs200-1_2v;
+	/delete-property/ mmc-hs400-1_8v;
+	/delete-property/ mmc-hs400-1_2v;
+	/delete-property/ mmc-hs400-enhanced-strobe;
 	bus-width = <8>;
 	no-sdio;
 	no-sd;

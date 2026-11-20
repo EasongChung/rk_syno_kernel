@@ -463,6 +463,51 @@ static struct thermal_cooling_device_ops cpufreq_cooling_ops = {
 };
 
 /**
+ * cpufreq_cooling_get_state_for_freq - resolve a cap using the filtered OPP table
+ * @cdev: CPUFreq cooling device
+ * @freq_khz: requested maximum frequency in kHz
+ * @state: cooling state that enforces the cap
+ *
+ * Select the fastest available frequency not above @freq_khz.  Some SoC bins
+ * have no OPP below the requested cap (e.g. the J table starts at 1008 MHz).
+ * In that case use the lowest available OPP and report the weaker protection.
+ * Called while binding a cooling map, not on each thermal polling tick.
+ */
+int cpufreq_cooling_get_state_for_freq(struct thermal_cooling_device *cdev,
+				     unsigned int freq_khz,
+				     unsigned long *state)
+{
+	struct cpufreq_cooling_device *cpufreq_cdev;
+	unsigned long level;
+	unsigned int frequency;
+
+	if (!cdev || !state || !freq_khz)
+		return -EINVAL;
+	if (cdev->ops != &cpufreq_cooling_ops)
+		return -EOPNOTSUPP;
+
+	cpufreq_cdev = cdev->devdata;
+	if (!cpufreq_cdev || !cpufreq_cdev->policy)
+		return -EINVAL;
+
+	for (level = 0; level <= cpufreq_cdev->max_level; level++) {
+		frequency = get_state_freq(cpufreq_cdev, level);
+		if (frequency <= freq_khz) {
+			*state = level;
+			return 0;
+		}
+	}
+
+	*state = cpufreq_cdev->max_level;
+	frequency = get_state_freq(cpufreq_cdev, *state);
+	dev_warn(&cdev->device,
+		 "CPU cap %u kHz below lowest OPP %u kHz; using state %lu\n",
+		 freq_khz, frequency, *state);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(cpufreq_cooling_get_state_for_freq);
+
+/**
  * __cpufreq_cooling_register - helper function to create cpufreq cooling device
  * @np: a valid struct device_node to the cooling device device tree node
  * @policy: cpufreq policy

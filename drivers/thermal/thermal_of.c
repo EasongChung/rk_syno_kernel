@@ -8,6 +8,7 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
+#include <linux/cpu_cooling.h>
 #include <linux/err.h>
 #include <linux/export.h>
 #include <linux/of_device.h>
@@ -40,6 +41,7 @@ struct __thermal_cooling_bind_param {
  * @count: number of elements in array
  * @trip_id: the trip point index
  * @usage: the percentage (from 0 to 100) of cooling contribution
+ * @cpu_frequency_limit: optional CPU frequency cap in kHz, zero for legacy maps
  */
 
 struct __thermal_bind_params {
@@ -47,6 +49,7 @@ struct __thermal_bind_params {
 	unsigned int count;
 	unsigned int trip_id;
 	unsigned int usage;
+	u32 cpu_frequency_limit;
 };
 
 /**
@@ -219,12 +222,23 @@ static int of_thermal_bind(struct thermal_zone_device *thermal,
 			tcbp = tbp->tcbp + j;
 
 			if (tcbp->cooling_device == cdev->np) {
+				unsigned long lower = tcbp->min;
 				int ret;
+
+				if (tbp->cpu_frequency_limit) {
+					ret = cpufreq_cooling_get_state_for_freq(cdev,
+							tbp->cpu_frequency_limit, &lower);
+					if (ret) {
+						dev_err(&thermal->device,
+							"Cannot bind CPU frequency cap: %d\n", ret);
+						return ret;
+					}
+				}
 
 				ret = thermal_zone_bind_cooling_device(thermal,
 						tbp->trip_id, cdev,
 						tcbp->max,
-						tcbp->min,
+						lower,
 						tbp->usage);
 				if (ret)
 					return ret;
@@ -711,6 +725,26 @@ static int thermal_of_populate_bind_params(struct device_node *np,
 		pr_err("Add a cooling_device property with at least one device\n");
 		ret = -ENOENT;
 		goto end;
+	}
+
+	/* This optional extension applies only to a single CPU cooling device. */
+	__tbp->cpu_frequency_limit = 0;
+	if (of_find_property(np, "rockchip,cpu-frequency-ceiling-khz", NULL)) {
+		ret = of_property_count_u32_elems(np,
+				"rockchip,cpu-frequency-ceiling-khz");
+		if (count != 1 || ret != 1) {
+			pr_err("CPU frequency cap requires one scalar and one device\n");
+			ret = -EINVAL;
+			goto end;
+		}
+		ret = of_property_read_u32(np,
+				"rockchip,cpu-frequency-ceiling-khz", &prop);
+		if (ret || !prop) {
+			pr_err("Invalid CPU frequency cap\n");
+			ret = -EINVAL;
+			goto end;
+		}
+		__tbp->cpu_frequency_limit = prop;
 	}
 
 	__tcbp = kcalloc(count, sizeof(*__tcbp), GFP_KERNEL);
